@@ -18,7 +18,7 @@ from pelican import signals
 from bs4 import BeautifulSoup
 from PIL import Image
 from urlparse import urlparse
-
+import requests
 
 
 class Cache():
@@ -30,9 +30,9 @@ class Cache():
     if url not in self.cached:
       content = ""
       if is_raw(url):
-        content = b64encode(self.session().get(url).content)
+        content = self.session().get(url).content
       else:
-        content = b64encode(self.session().get(url).text.encode('utf-8'))
+        content = self.session().get(url).text.encode('utf-8')
       self.cached[url] = content
 
     return self.cached[url]
@@ -49,6 +49,9 @@ class Cache():
   def list_pages(self):
     return self.cached.iterkeys()
 
+  def clean_cache(self):
+    self.cached = {}
+
 
 cache = Cache()
 
@@ -58,7 +61,7 @@ def is_raw(url):
   url = url.split("#")[0].split("?")[0].split(";")[0]
   return url.split(".")[-1].lower() in ["zip", "mp3", "pdf", "anki", "js",
                                         "png", "jpg", "jpeg", "gif", "css",
-                                        "xml"] or "css" in url
+                                        "xml", "svg", 'ttf', 'woff'] or "css" in url
 
 def crawl(url):
   root = '{uri.scheme}://{uri.netloc}'.format(uri=urlparse(url))
@@ -66,7 +69,7 @@ def crawl(url):
 
   if is_raw(url):
     print "saving raw file %s" % url
-    page = cache.fetch(url).get()
+    page = cache.fetch(url)
 
     # parse css files for linked ressources
     if ".css" in url:
@@ -88,13 +91,13 @@ def crawl(url):
       links = map(lambda a: a.split(";")[0], links)
       links = map(make_absolute, links)
       print "searching for", links
-      return filter(lambda l: not cache.has(l).get(), links)
+      return filter(lambda l: not cache.has(l), links)
 
     # assume other raw files (images, js, music) don't contain links
     return []
 
   print "crawling %s" % url
-  page = cache.fetch(url).get()
+  page = cache.fetch(url)
   soup = BeautifulSoup(page, "lxml")
 
   # get linked ressources
@@ -106,23 +109,85 @@ def crawl(url):
   scripts = filter(lambda s: s is not None, scripts)
   scripts = map(lambda s: root + s if s[0] == '/' else s, scripts)  # make absolute
 
-  styles = map(lambda s: s.get('href'), soup.find_all('link'))
+  styles = filter(lambda s: 'stylesheet' in s.get('rel'), soup.find_all('link'))
+  styles = map(lambda s: s.get('href'), styles)
   styles = filter(lambda s: s is not None, styles)
   styles = map(lambda s: root + s if s[0] == '/' else s, styles)  # make absolute
-  styles = filter(isAllowed, styles)
 
-  return filter(lambda l: not cache.has(l).get(), images + scripts + styles)
+  return filter(lambda l: not cache.has(l), images + scripts + styles)
 
 
-def mirror(url):
+def mirror(url, cache_dir):
+  print "trying to cache %s" % cache_dir
   urls = [url]
   while urls:
-    urls += crawl(urls.pop(0))
+    try:
+      urls += crawl(urls.pop(0))
+    except:
+      pass
 
-  with open(os.path.join(cache_dir, 'index.html'), 'w') as f:
-    f.write('bla')
+  # finished downloading all content we need, now write it out
+  for url in cache.list_pages():
+    build(url, cache_dir)
 
-  print "trying to cache %s" % cache_dir
+  cache.clean_cache()
+
+
+def make_html_link(url, skip_anchor=False):
+  url = url.lower()
+  path = url.split("#")[0].split("?")[0].split(";")[0]
+
+  if len(path) > 0:
+    if path[-1] == "/":
+      path += "index.html"
+    elif "." not in path.split("/")[-1]:
+      path += "/index.html"
+
+  if skip_anchor or "#" not in url:
+    return path
+  return path + "#" + url.split("#")[-1]
+
+def url2path(url, cache_dir):
+  return os.path.join(cache_dir,
+    make_html_link(url, skip_anchor=True).replace("http://", "").replace("https://", ""))
+
+def build(url, cache_dir):
+  path = url2path(url, cache_dir)
+  page = cache.fetch(url)
+
+  if not os.path.exists(os.path.dirname(path)):
+    os.makedirs(os.path.dirname(path))
+
+  if is_raw(url):
+    print "dumping %s" % url
+    with open(path, "w") as f:
+      f.write(page)
+    return
+
+  print "building %s as %s" % (url, path)
+  soup = BeautifulSoup(page, "lxml")
+
+  def format_link(local_url):
+    try:
+      if local_url[0] == '/':
+        return make_html_link(((url.count("/") - 2) * "../") + local_url[1:])
+      elif "http" in local_url:
+          base_url = u'{uri.netloc}{uri.path}'.format(uri=urlparse(local_url))
+          return make_html_link(((url.count("/") - 1) * "../") + base_url)
+      else:
+        return make_html_link(local_url)
+    except:
+      return local_url
+
+  for tag in soup.find_all(['a', 'img', 'script', 'link']):
+    if "href" in tag.attrs:
+      tag['href'] = format_link(tag['href'])
+    if "src" in tag.attrs:
+      tag['src'] = format_link(tag['src'])
+
+  with open(path, "w") as f:
+    f.write(soup.prettify(formatter=None).encode('utf-8'))
+
 
 
 def content_object_init(instance):
@@ -146,7 +211,7 @@ def content_object_init(instance):
     if 'http' not in href:
       continue
 
-    # strip of protocol, replace slashes by _ so we can use it as a filename
+    # strip protocol, replace slashes by _ so we can use it as a filename
     cache_name = href.split(':')[1][2:].replace('/', '_')
     if cache_name[-1] == '_':
       cache_name = cache_name[:-1]
@@ -155,18 +220,19 @@ def content_object_init(instance):
     pelican_dir = os.path.split(instance.settings['PATH'])[0]
     cache_dir = os.path.join(pelican_dir, 'cache', tag, cache_name)
 
+    # only mirror if we don't already have the site for that post
     if not os.path.exists(cache_dir):
-      # lazy way to make sure all dirs exist
-      try:
-        os.makedirs(cache_dir)
-      except:
-        pass
+      mirror(href, cache_dir)
 
-      # mirror(href, cache_dir)
-
+    # add link to archived version after real link
     archive_link = soup.new_tag('a')
     archive_link.string = "[archived]"
-    archive_link['href'] = '/cache/' + tag + '/' + cache_name + '/'
+    archive_link['href'] = url2path(href, os.path.join('cache', tag, cache_name))
+    print 
+    print
+    print archive_link['href']
+    print 
+    print
     link.insert_after(archive_link)
     link.insert_after(" ")
 
