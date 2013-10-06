@@ -17,6 +17,112 @@ from pelican import signals
 
 from bs4 import BeautifulSoup
 from PIL import Image
+from urlparse import urlparse
+
+
+
+class Cache():
+  def __init__(self):
+    self.s = None
+    self.cached = {}
+
+  def fetch(self, url):
+    if url not in self.cached:
+      content = ""
+      if is_raw(url):
+        content = b64encode(self.session().get(url).content)
+      else:
+        content = b64encode(self.session().get(url).text.encode('utf-8'))
+      self.cached[url] = content
+
+    return self.cached[url]
+
+  def has(self, url):
+    return url in self.cached
+
+  def session(self):
+    if self.s is None:
+      self.s = requests.Session()
+      self.s.headers.update({'User-Agent': 'Mozilla/5.0 (compatible; http://furida.mu/link-archiver)'})
+    return self.s
+
+  def list_pages(self):
+    return self.cached.iterkeys()
+
+
+cache = Cache()
+
+
+def is_raw(url):
+  # Todo - do this check based on the content type of the url
+  url = url.split("#")[0].split("?")[0].split(";")[0]
+  return url.split(".")[-1].lower() in ["zip", "mp3", "pdf", "anki", "js",
+                                        "png", "jpg", "jpeg", "gif", "css",
+                                        "xml"] or "css" in url
+
+def crawl(url):
+  root = '{uri.scheme}://{uri.netloc}'.format(uri=urlparse(url))
+  folder = "/".join(url.split("/")[:-1]) + "/"
+
+  if is_raw(url):
+    print "saving raw file %s" % url
+    page = cache.fetch(url).get()
+
+    # parse css files for linked ressources
+    if ".css" in url:
+      def make_absolute(link):
+        if link[0] == "/":
+          return root + link
+        elif "http://" in link or "https://" in link:
+          return link
+        else:
+          full_link = (folder + link).split("/")
+          while ".." in full_link:
+            i = full_link.index("..")
+            full_link.pop(i)
+            full_link.pop(i-1)
+          return "/".join(full_link)
+
+      links = re.findall("url\(([^)]+)\)", page)
+      links = map(lambda s: s.strip().replace('"', '').replace("'", ''), links)
+      links = map(lambda a: a.split(";")[0], links)
+      links = map(make_absolute, links)
+      print "searching for", links
+      return filter(lambda l: not cache.has(l).get(), links)
+
+    # assume other raw files (images, js, music) don't contain links
+    return []
+
+  print "crawling %s" % url
+  page = cache.fetch(url).get()
+  soup = BeautifulSoup(page, "lxml")
+
+  # get linked ressources
+  images = map(lambda img: img.get('src'), soup.find_all('img'))
+  images = filter(lambda img: img is not None, images)
+  images = map(lambda img: root + img if img[0] == '/' else img, images)  # make absolute
+
+  scripts = map(lambda s: s.get('src'), soup.find_all('script'))
+  scripts = filter(lambda s: s is not None, scripts)
+  scripts = map(lambda s: root + s if s[0] == '/' else s, scripts)  # make absolute
+
+  styles = map(lambda s: s.get('href'), soup.find_all('link'))
+  styles = filter(lambda s: s is not None, styles)
+  styles = map(lambda s: root + s if s[0] == '/' else s, styles)  # make absolute
+  styles = filter(isAllowed, styles)
+
+  return filter(lambda l: not cache.has(l).get(), images + scripts + styles)
+
+
+def mirror(url):
+  urls = [url]
+  while urls:
+    urls += crawl(urls.pop(0))
+
+  with open(os.path.join(cache_dir, 'index.html'), 'w') as f:
+    f.write('bla')
+
+  print "trying to cache %s" % cache_dir
 
 
 def content_object_init(instance):
@@ -56,38 +162,13 @@ def content_object_init(instance):
       except:
         pass
 
-      with open(os.path.join(cache_dir, 'index.html'), 'w') as f:
-        f.write('bla')
+      # mirror(href, cache_dir)
 
-      print "trying to cache %s" % cache_dir
-
-    soup.new_tag(a)
-    link.insert_after()
-
-    continue
-    # TODO: Pretty sure this isn't the right way to do this, too hard coded.
-    # There must be a setting that I should be using?
-    src = instance.settings['PATH'] + '/images/' + os.path.split(img['src'])[1]
-    im = Image.open(src)
-    extra_style = 'width: {}px; height: auto;'.format(im.size[0])
-
-    if instance.settings['RESPONSIVE_IMAGES']:
-      extra_style += ' max-width: 100%;'
-
-    if img.get('style'):
-      img['style'] += extra_style
-    else:
-      img['style'] = extra_style
-
-    if img['alt'] == img['src']:
-      img['alt'] = ''
-
-    fig = img.find_parent('div', 'figure')
-    if fig:
-      if fig.get('style'):
-        fig['style'] += extra_style
-      else:
-        fig['style'] = extra_style
+    archive_link = soup.new_tag('a')
+    archive_link.string = "[archived]"
+    archive_link['href'] = '/cache/' + tag + '/' + cache_name + '/'
+    link.insert_after(archive_link)
+    link.insert_after(" ")
 
   instance._content = soup.decode()
 
