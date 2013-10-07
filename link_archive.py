@@ -16,6 +16,7 @@ import re
 from pelican import signals
 import logging
 import traceback
+import commands
 
 from bs4 import BeautifulSoup
 from PIL import Image
@@ -208,8 +209,6 @@ def content_object_init(instance):
   if tag[-1] == '_':
     tag = tag[:-1]
 
-  print tag
-
   for link in soup('a'):
     href = link['href']
 
@@ -221,7 +220,6 @@ def content_object_init(instance):
     cache_name = href.split(':')[1][2:].replace('/', '_')
     if cache_name[-1] == '_':
       cache_name = cache_name[:-1]
-    print cache_name
 
     pelican_dir = os.path.split(instance.settings['PATH'])[0]
     cache_dir = os.path.join(pelican_dir, 'cache', tag, cache_name)
@@ -234,11 +232,7 @@ def content_object_init(instance):
     archive_link = soup.new_tag('a')
     archive_link.string = "cache"
     archive_link['href'] = '/' + url2path(href, os.path.join('cache', tag, cache_name))
-    print 
-    print
-    print archive_link['href']
-    print 
-    print
+
     superscript = soup.new_tag('sup')
     superscript.append(archive_link)
     link.insert_after(superscript)
@@ -246,5 +240,14 @@ def content_object_init(instance):
   instance._content = soup.decode()
 
 
+# copy cached websites to output directory
+def copy_cache(instance):
+  print "copying cached files"
+  pelican_dir = os.path.split(instance.settings['PATH'])[0]
+
+  commands.getoutput("cp -rf %s %s" % (os.path.join(pelican_dir, "cache"),
+    os.path.join(pelican_dir, 'output')))
+
 def register():
   signals.content_object_init.connect(content_object_init)
+  signals.finalized.connect(copy_cache)
