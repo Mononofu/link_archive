@@ -17,6 +17,7 @@ from pelican import signals
 import logging
 import traceback
 import commands
+import urllib
 
 from bs4 import BeautifulSoup
 from PIL import Image
@@ -109,7 +110,7 @@ def crawl(url):
   scripts = map(lambda s: s.get('src'), soup.find_all('script'))
   styles = filter(lambda s: 'stylesheet' in s.get('rel'), soup.find_all('link'))
   styles = map(lambda s: s.get('href'), styles)
-  
+
   links = filter(lambda l: l is not None, images + scripts + styles)
   links = map(make_absolute, links)  # make absolute
   return filter(lambda l: not cache.has(l), links)
@@ -150,8 +151,9 @@ def make_html_link(url, skip_anchor=False):
   return path + "#" + url.split("#")[-1]
 
 def url2path(url, cache_dir):
-  return os.path.join(cache_dir,
-    make_html_link(url, skip_anchor=True).replace("http://", "").replace("https://", ""))
+  return urllib.unquote(os.path.join(cache_dir,
+    make_html_link(url, skip_anchor=True).replace("http://", "").replace(
+      "https://", "")))
 
 def build(url, cache_dir):
   path = url2path(url, cache_dir)
@@ -171,16 +173,21 @@ def build(url, cache_dir):
 
   def format_link(local_url):
     try:
+      # find out how many dirs we need to go up to  be at the base
+      # (ie into the dir that contains the current domain)
       slash_count = url.count('/')
-      # don't count trailing slash to normalize results
-      if url[-1] == '/':
-        slash_count -= 1
+      # even if there's no trailing slash the url will get it's own dir
+      if url[-1] != '/':
+        slash_count += 1
+      # subtract two // for the protocoll
+      slash_count -= 2
 
       if local_url[0] == '/':
-        return make_html_link(((slash_count - 3) * "../") + local_url[1:])
+        # local url - stay on same domain (go up one less)
+        return make_html_link(((slash_count - 1) * "../") + local_url[1:])
       elif "http" in local_url:
           base_url = u'{uri.netloc}{uri.path}'.format(uri=urlparse(local_url))
-          return make_html_link(((slash_count - 1) * "../") + base_url)
+          return make_html_link((slash_count * "../") + base_url)
       else:
         return make_html_link(local_url)
     except:
