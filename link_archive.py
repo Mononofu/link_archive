@@ -12,8 +12,10 @@ TODO: Need to add a test.py for this plugin.
 """
 
 import os
-
+import re
 from pelican import signals
+import logging
+import traceback
 
 from bs4 import BeautifulSoup
 from PIL import Image
@@ -63,9 +65,23 @@ def is_raw(url):
                                         "png", "jpg", "jpeg", "gif", "css",
                                         "xml", "svg", 'ttf', 'woff'] or "css" in url
 
+
 def crawl(url):
   root = '{uri.scheme}://{uri.netloc}'.format(uri=urlparse(url))
   folder = "/".join(url.split("/")[:-1]) + "/"
+
+  def make_absolute(link):
+    if link[0] == "/":
+      return root + link
+    elif "http://" in link or "https://" in link:
+      return link
+    else:
+      full_link = (folder + link).split("/")
+      while ".." in full_link:
+        i = full_link.index("..")
+        full_link.pop(i)
+        full_link.pop(i-1)
+      return "/".join(full_link)
 
   if is_raw(url):
     print "saving raw file %s" % url
@@ -73,19 +89,6 @@ def crawl(url):
 
     # parse css files for linked ressources
     if ".css" in url:
-      def make_absolute(link):
-        if link[0] == "/":
-          return root + link
-        elif "http://" in link or "https://" in link:
-          return link
-        else:
-          full_link = (folder + link).split("/")
-          while ".." in full_link:
-            i = full_link.index("..")
-            full_link.pop(i)
-            full_link.pop(i-1)
-          return "/".join(full_link)
-
       links = re.findall("url\(([^)]+)\)", page)
       links = map(lambda s: s.strip().replace('"', '').replace("'", ''), links)
       links = map(lambda a: a.split(";")[0], links)
@@ -102,29 +105,27 @@ def crawl(url):
 
   # get linked ressources
   images = map(lambda img: img.get('src'), soup.find_all('img'))
-  images = filter(lambda img: img is not None, images)
-  images = map(lambda img: root + img if img[0] == '/' else img, images)  # make absolute
-
   scripts = map(lambda s: s.get('src'), soup.find_all('script'))
-  scripts = filter(lambda s: s is not None, scripts)
-  scripts = map(lambda s: root + s if s[0] == '/' else s, scripts)  # make absolute
-
   styles = filter(lambda s: 'stylesheet' in s.get('rel'), soup.find_all('link'))
   styles = map(lambda s: s.get('href'), styles)
-  styles = filter(lambda s: s is not None, styles)
-  styles = map(lambda s: root + s if s[0] == '/' else s, styles)  # make absolute
-
-  return filter(lambda l: not cache.has(l), images + scripts + styles)
+  
+  links = filter(lambda l: l is not None, images + scripts + styles)
+  links = map(make_absolute, links)  # make absolute
+  return filter(lambda l: not cache.has(l), links)
 
 
 def mirror(url, cache_dir):
   print "trying to cache %s" % cache_dir
   urls = [url]
   while urls:
+    url = urls.pop(0)
     try:
-      urls += crawl(urls.pop(0))
-    except:
-      pass
+      urls += crawl(url)
+    except Exception as e:
+      print
+      logging.exception("error fetching %s" % url)
+      traceback.print_exc()
+      print
 
   # finished downloading all content we need, now write it out
   for url in cache.list_pages():
@@ -169,17 +170,22 @@ def build(url, cache_dir):
 
   def format_link(local_url):
     try:
+      slash_count = url.count('/')
+      # don't count trailing slash to normalize results
+      if url[-1] == '/':
+        slash_count -= 1
+
       if local_url[0] == '/':
-        return make_html_link(((url.count("/") - 2) * "../") + local_url[1:])
+        return make_html_link(((slash_count - 3) * "../") + local_url[1:])
       elif "http" in local_url:
           base_url = u'{uri.netloc}{uri.path}'.format(uri=urlparse(local_url))
-          return make_html_link(((url.count("/") - 1) * "../") + base_url)
+          return make_html_link(((slash_count - 1) * "../") + base_url)
       else:
         return make_html_link(local_url)
     except:
       return local_url
 
-  for tag in soup.find_all(['a', 'img', 'script', 'link']):
+  for tag in soup.find_all(['img', 'script', 'link']):
     if "href" in tag.attrs:
       tag['href'] = format_link(tag['href'])
     if "src" in tag.attrs:
@@ -226,7 +232,7 @@ def content_object_init(instance):
 
     # add link to archived version after real link
     archive_link = soup.new_tag('a')
-    archive_link.string = "[archived]"
+    archive_link.string = "[cache]"
     archive_link['href'] = url2path(href, os.path.join('cache', tag, cache_name))
     print 
     print
