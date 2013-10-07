@@ -232,15 +232,16 @@ def content_object_init(instance):
 
     # add link to archived version after real link
     archive_link = soup.new_tag('a')
-    archive_link.string = "[cache]"
-    archive_link['href'] = url2path(href, os.path.join('cache', tag, cache_name))
+    archive_link.string = "cache"
+    archive_link['href'] = '/' + url2path(href, os.path.join('cache', tag, cache_name))
     print 
     print
     print archive_link['href']
     print 
     print
-    link.insert_after(archive_link)
-    link.insert_after(" ")
+    superscript = soup.new_tag('sup')
+    superscript.append(archive_link)
+    link.insert_after(superscript)
 
   instance._content = soup.decode()
 
