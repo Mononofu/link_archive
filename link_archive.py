@@ -24,8 +24,9 @@ from PIL import Image
 from urlparse import urlparse
 import requests
 
+import sqlite3
 
-class Cache():
+class Fetcher():
   def __init__(self):
     self.s = None
     self.cached = {}
@@ -57,7 +58,7 @@ class Cache():
     self.cached = {}
 
 
-cache = Cache()
+fetcher = Fetcher()
 
 
 def is_raw(url):
@@ -87,7 +88,7 @@ def crawl(url):
 
   if is_raw(url):
     print "saving raw file %s" % url
-    page = cache.fetch(url)
+    page = fetcher.fetch(url)
 
     # parse css files for linked ressources
     if ".css" in url:
@@ -96,13 +97,13 @@ def crawl(url):
       links = map(lambda a: a.split(";")[0], links)
       links = map(make_absolute, links)
       print "searching for", links
-      return filter(lambda l: not cache.has(l), links)
+      return filter(lambda l: not fetcher.has(l), links)
 
     # assume other raw files (images, js, music) don't contain links
     return []
 
   print "crawling %s" % url
-  page = cache.fetch(url)
+  page = fetcher.fetch(url)
   soup = BeautifulSoup(page, "lxml")
 
   # get linked ressources
@@ -113,11 +114,11 @@ def crawl(url):
 
   links = filter(lambda l: l is not None, images + scripts + styles)
   links = map(make_absolute, links)  # make absolute
-  return filter(lambda l: not cache.has(l), links)
+  return filter(lambda l: not fetcher.has(l), links)
 
 
-def mirror(url, cache_dir):
-  print "trying to cache %s" % cache_dir
+def mirror(url, fetcher_dir):
+  print "trying to fetcher %s" % cache_dir
   urls = [url]
   while urls:
     url = urls.pop(0)
@@ -130,10 +131,10 @@ def mirror(url, cache_dir):
       print
 
   # finished downloading all content we need, now write it out
-  for url in cache.list_pages():
+  for url in fetcher.list_pages():
     build(url, cache_dir)
 
-  cache.clean_cache()
+  fetcher.clean_cache()
 
 
 def make_html_link(url, skip_anchor=False):
@@ -157,7 +158,7 @@ def url2path(url, cache_dir):
 
 def build(url, cache_dir):
   path = url2path(url, cache_dir)
-  page = cache.fetch(url)
+  page = fetcher.fetch(url)
 
   if not os.path.exists(os.path.dirname(path)):
     os.makedirs(os.path.dirname(path))
@@ -223,6 +224,11 @@ def content_object_init(instance):
     if 'http' not in href:
       continue
 
+    # don't cache links marked as transient
+    if "!" == href[0]:
+      link['href'] = href[1:]   # strip marker
+      continue
+
     # strip protocol, replace slashes by _ so we can use it as a filename
     cache_name = href.split(':')[1][2:].replace('/', '_')
     if cache_name[-1] == '_':
@@ -232,7 +238,7 @@ def content_object_init(instance):
     cache_dir = os.path.join(pelican_dir, 'cache', tag, cache_name)
 
     # only mirror if we don't already have the site for that post
-    if not os.path.exists(cache_dir):
+    if not os.path.exists(urllib.unquote(cache_dir)):
       mirror(href, cache_dir)
 
     # add link to archived version after real link
