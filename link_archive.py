@@ -20,13 +20,36 @@ import commands
 import urllib
 
 from bs4 import BeautifulSoup
-from PIL import Image
 from urlparse import urlparse
 import requests
 
 import sqlite3
 
+class Cache():
+  "cache keyed by md5 to avoid saving files more than once"
+
+  def __init__(self):
+    self.c = sqlite3.connect('cache.db')
+    cur = self.c.cursor()
+    cur.execute("create table if not exists files(md5 text, filename text)")
+    self.c.commit()
+
+  def __getitem__(self, md5):
+    cur = self.c.cursor()
+    cur.execute("select filename from files where md5=:md5", {"md5": md5})
+    return cur.fetchone()[0]
+
+  def __contains__(self, md5):
+    return self[md5] is not None
+
+  def __setitem__(self, md5, filename):
+    cur = self.c.cursor()
+    cur.execute("insert into files values (?, ?)", (md5, filename))
+    self.c.commit()
+
 class Fetcher():
+  """requests based fetcher that caches urls to only fetch them once.
+  currently no expiring is down, so may run out of memory."""
   def __init__(self):
     self.s = None
     self.cached = {}
@@ -117,8 +140,8 @@ def crawl(url):
   return filter(lambda l: not fetcher.has(l), links)
 
 
-def mirror(url, fetcher_dir):
-  print "trying to fetcher %s" % cache_dir
+def mirror(url, cache_dir):
+  print "trying to cache %s" % cache_dir
   urls = [url]
   while urls:
     url = urls.pop(0)
