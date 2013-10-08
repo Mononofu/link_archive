@@ -17,6 +17,7 @@ from pelican import signals
 import logging
 import traceback
 import commands
+import subprocess
 import urllib
 
 from bs4 import BeautifulSoup
@@ -37,7 +38,11 @@ class Cache():
   def __getitem__(self, md5):
     cur = self.c.cursor()
     cur.execute("select filename from files where md5=:md5", {"md5": md5})
-    return cur.fetchone()[0]
+    row = cur.fetchone()
+    if row is None:
+      return None
+
+    return row[0]
 
   def __contains__(self, md5):
     return self[md5] is not None
@@ -65,6 +70,9 @@ class Fetcher():
 
     return self.cached[url]
 
+  def erase(self, url):
+    del self.cached[url]
+
   def has(self, url):
     return url in self.cached
 
@@ -82,7 +90,11 @@ class Fetcher():
 
 
 fetcher = Fetcher()
+cache = Cache()
 
+# lookup from url to file that has its contents. can be point to a previous site,
+# thus the lookup. emptied between mirroring different sites.
+file_for_url = {}
 
 def is_raw(url):
   # Todo - do this check based on the content type of the url
@@ -91,34 +103,51 @@ def is_raw(url):
                                         "png", "jpg", "jpeg", "gif", "css",
                                         "xml", "svg", 'ttf', 'woff'] or "css" in url
 
+def strip_protocol(url):
+  return u'{uri.netloc}{uri.path}'.format(uri=urlparse(url))
 
-def crawl(url):
+
+def make_absolute(link, root, folder):
+  if link[0] == "/":
+    return root + link
+  elif "http://" in link or "https://" in link:
+    return link
+  else:
+    full_link = (folder + link).split("/")
+    while ".." in full_link:
+      i = full_link.index("..")
+      full_link.pop(i)
+      full_link.pop(i-1)
+    return "/".join(full_link)
+
+def crawl(url, cache_url):
   root = '{uri.scheme}://{uri.netloc}'.format(uri=urlparse(url))
   folder = "/".join(url.split("/")[:-1]) + "/"
-
-  def make_absolute(link):
-    if link[0] == "/":
-      return root + link
-    elif "http://" in link or "https://" in link:
-      return link
-    else:
-      full_link = (folder + link).split("/")
-      while ".." in full_link:
-        i = full_link.index("..")
-        full_link.pop(i)
-        full_link.pop(i-1)
-      return "/".join(full_link)
 
   if is_raw(url):
     print "saving raw file %s" % url
     page = fetcher.fetch(url)
+
+    # check if we already have this file somewhere
+    proc = subprocess.Popen('md5sum', stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    stdout, stderr = proc.communicate(page)
+    md5 = stdout.split(" ")[0]
+
+    if md5 in cache:
+      # reuse it, don't distuingish between http and https
+      file_for_url[strip_protocol(url)] = cache[md5]
+      fetcher.erase(url)
+      return []
+
+    file_for_url[strip_protocol(url)] = url2path(url, cache_url)
+    cache[md5] = file_for_url[strip_protocol(url)]
 
     # parse css files for linked ressources
     if ".css" in url:
       links = re.findall("url\(([^)]+)\)", page)
       links = map(lambda s: s.strip().replace('"', '').replace("'", ''), links)
       links = map(lambda a: a.split(";")[0], links)
-      links = map(make_absolute, links)
+      links = map(lambda a: make_absolute(a, root, folder), links)
       print "searching for", links
       return filter(lambda l: not fetcher.has(l), links)
 
@@ -132,22 +161,25 @@ def crawl(url):
   # get linked ressources
   images = map(lambda img: img.get('src'), soup.find_all('img'))
   scripts = map(lambda s: s.get('src'), soup.find_all('script'))
-  styles = filter(lambda s: 'stylesheet' in s.get('rel'), soup.find_all('link'))
+  styles = filter(lambda s: s.get('rel') and 'stylesheet' in s.get('rel'), soup.find_all('link'))
   styles = map(lambda s: s.get('href'), styles)
 
   links = filter(lambda l: l is not None, images + scripts + styles)
-  links = map(make_absolute, links)  # make absolute
+  links = map(lambda l: make_absolute(l, root, folder), links)
   return filter(lambda l: not fetcher.has(l), links)
 
 
-def mirror(url, cache_dir):
+def mirror(url, cache_dir, cache_url):
+  fetcher.clean_cache()
+  file_for_url.clear()
+
   print "trying to cache %s" % cache_dir
   urls = [url]
   while urls:
     url = urls.pop(0)
     try:
-      urls += crawl(url)
-    except Exception as e:
+      urls += crawl(url, cache_url)
+    except:
       print
       logging.exception("error fetching %s" % url)
       traceback.print_exc()
@@ -155,19 +187,19 @@ def mirror(url, cache_dir):
 
   # finished downloading all content we need, now write it out
   for url in fetcher.list_pages():
+    print "processing %s" % url
     build(url, cache_dir)
-
-  fetcher.clean_cache()
 
 
 def make_html_link(url, skip_anchor=False):
+  query = '{uri.path}'.format(uri=urlparse(url))
   url = url.lower()
   path = url.split("#")[0].split("?")[0].split(";")[0]
 
   if len(path) > 0:
     if path[-1] == "/":
       path += "index.html"
-    elif "." not in path.split("/")[-1]:
+    elif "." not in query.split("/")[-1]:
       path += "/index.html"
 
   if skip_anchor or "#" not in url:
@@ -176,12 +208,13 @@ def make_html_link(url, skip_anchor=False):
 
 def url2path(url, cache_dir):
   return urllib.unquote(os.path.join(cache_dir,
-    make_html_link(url, skip_anchor=True).replace("http://", "").replace(
-      "https://", "")))
+    strip_protocol(make_html_link(url, skip_anchor=True))))
 
 def build(url, cache_dir):
   path = url2path(url, cache_dir)
   page = fetcher.fetch(url)
+  root = '{uri.scheme}://{uri.netloc}'.format(uri=urlparse(url))
+  folder = "/".join(url.split("/")[:-1]) + "/"
 
   if not os.path.exists(os.path.dirname(path)):
     os.makedirs(os.path.dirname(path))
@@ -196,32 +229,16 @@ def build(url, cache_dir):
   soup = BeautifulSoup(page, "lxml")
 
   def format_link(local_url):
-    try:
-      # find out how many dirs we need to go up to  be at the base
-      # (ie into the dir that contains the current domain)
-      slash_count = url.count('/')
-      # even if there's no trailing slash the url will get it's own dir
-      if url[-1] != '/':
-        slash_count += 1
-      # subtract two // for the protocoll
-      slash_count -= 2
+    print local_url
+    return file_for_url[strip_protocol(make_absolute(local_url, root, folder))]
 
-      if local_url[0] == '/':
-        # local url - stay on same domain (go up one less)
-        return make_html_link(((slash_count - 1) * "../") + local_url[1:])
-      elif "http" in local_url:
-          base_url = u'{uri.netloc}{uri.path}'.format(uri=urlparse(local_url))
-          return make_html_link((slash_count * "../") + base_url)
-      else:
-        return make_html_link(local_url)
-    except:
-      return local_url
-
-  for tag in soup.find_all(['img', 'script', 'link']):
-    if "href" in tag.attrs:
-      tag['href'] = format_link(tag['href'])
-    if "src" in tag.attrs:
+  for tag in soup.find_all(['script', 'img']):
+    if 'src' in tag:
       tag['src'] = format_link(tag['src'])
+
+  for tag in filter(lambda s: s.get('rel') and 'stylesheet' in s.get('rel'), soup.find_all('link')):
+    if 'href' in tag:
+      tag['href'] = format_link(tag['href'])
 
   with open(path, "w") as f:
     f.write(soup.prettify(formatter=None).encode('utf-8'))
@@ -259,10 +276,11 @@ def content_object_init(instance):
 
     pelican_dir = os.path.split(instance.settings['PATH'])[0]
     cache_dir = os.path.join(pelican_dir, 'cache', tag, cache_name)
+    cache_url = os.path.join('/cache', tag, cache_name)
 
     # only mirror if we don't already have the site for that post
     if not os.path.exists(urllib.unquote(cache_dir)):
-      mirror(href, cache_dir)
+      mirror(href, cache_dir, cache_url)
 
     # add link to archived version after real link
     archive_link = soup.new_tag('a')
